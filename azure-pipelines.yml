@@ -1,0 +1,320 @@
+# Node.js
+# Build a general Node.js project with npm.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
+
+trigger:
+- master
+
+variables:
+  YARN_CACHE_FOLDER: $(Pipeline.Workspace)/.yarn
+
+stages:
+- stage: BuildGhost
+  displayName: Build Ghost
+  pool:
+    vmImage: 'vs2017-win2016'
+  jobs:
+    - job: BuildGhost
+      displayName: Build Ghost
+      steps:
+      - task: UseNode@1
+        inputs:
+          version: '10.16.3'
+      - script: node -v
+      - script: node -p "process.arch"
+      - task: Cache@2
+        inputs:
+          key: 'v3 | yarn | "$(Agent.OS)" | yarn.lock'
+          restoreKeys: |
+            v3 | yarn | "$(Agent.OS)"
+            v3 | yarn
+          path: $(YARN_CACHE_FOLDER)
+        displayName: Cache Yarn packages
+
+      - script: yarn --ignore-engines --production
+
+      - task: AzurePowerShell@3
+        displayName: 'Download files from production'
+        inputs:
+          azureSubscription: '$(AzureSubscription)'
+          ScriptType: 'InlineScript'
+          Inline: |
+            function Get-AzureRmWebAppPublishingCredentials($resourceGroupName, $webAppName, $slotName = $null){
+                if ([string]::IsNullOrWhiteSpace($slotName)){
+                  $resourceType = "Microsoft.Web/sites/config"
+                  $resourceName = "$webAppName/publishingcredentials"
+                }
+                else{
+                  $resourceType = "Microsoft.Web/sites/slots/config"
+                  $resourceName = "$webAppName/$slotName/publishingcredentials"
+                }
+                $publishingCredentials = Invoke-AzureRmResourceAction -ResourceGroupName $resourceGroupName -ResourceType $resourceType -ResourceName $resourceName -Action list -ApiVersion 2015-08-01 -Force
+                return $publishingCredentials
+            }
+            function Get-KuduApiAuthorisationHeaderValue($resourceGroupName, $webAppName, $slotName = $null){
+                if ([string]::IsNullOrWhiteSpace($slotName)){
+                  $slotName = $null
+                }
+                $publishingCredentials = Get-AzureRmWebAppPublishingCredentials $resourceGroupName $webAppName $slotName
+                return ("Basic {0}" -f [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $publishingCredentials.Properties.PublishingUserName, $publishingCredentials.Properties.PublishingPassword))))
+            }
+            function Start-WebJob($resourceGroupName, $webAppName, $slotName = $null, $webJobName){
+                if ([string]::IsNullOrWhiteSpace($slotName)){
+                  $slotName = $null
+                }
+                $kuduApiAuthorisationToken = Get-KuduApiAuthorisationHeaderValue $resourceGroupName $webAppName $slotName
+                if ([string]::IsNullOrWhiteSpace($slotName)){
+                    $kuduApiUrl = "https://$webAppName.scm.azurewebsites.net/api/triggeredwebjobs/$webJobName/run"
+                }
+                else{
+                    $kuduApiUrl = "https://$webAppName`-$slotName.scm.azurewebsites.net/api/triggeredwebjobs/$webJobName/run"
+                }
+            
+                Invoke-RestMethod -Uri $kuduApiUrl `
+                                    -Headers @{"Authorization"=$kuduApiAuthorisationToken} `
+                                    -Method POST `
+                                    -ContentType "multipart/form-data"
+            }
+            function Start-ZipDownload($resourceGroupName, $webAppName, $slotName = $null, $kuduPath, $filename){
+                if ([string]::IsNullOrWhiteSpace($slotName)){
+                  $slotName = $null
+                }
+                $kuduApiAuthorisationToken = Get-KuduApiAuthorisationHeaderValue $resourceGroupName $webAppName $slotName
+                if ([string]::IsNullOrWhiteSpace($slotName)){
+                    $kuduApiUrl = "https://$webAppName.scm.azurewebsites.net/api/zip/site/wwwroot/$kuduPath/"
+                }
+                else{
+                    $kuduApiUrl = "https://$webAppName`-$slotName.scm.azurewebsites.net/api/zip/site/wwwroot/$kuduPath/"
+                }
+                Write-Host "Downloading to $(Build.Repository.LocalPath)/$filename"
+                $wc = New-Object System.Net.WebClient
+                $wc.Headers["Authorization"] = $kuduApiAuthorisationToken
+                $wc.DownloadFile($kuduApiUrl, "$(Build.Repository.LocalPath)/$filename")
+            }
+            
+            $resourceGroup = $env:RESOURCEGROUP
+            $webApp = $env:WEBAPP
+            $slotName = $env:SLOTNAME
+            $webJobName = $env:WEBJOBNAME
+            
+            Write-Host "Trigger database backup"
+            Start-WebJob $resourceGroup $webApp $slotName $webJobName
+            
+            Write-Host "Wait for job to finish"
+            Start-Sleep -Seconds 15
+            
+            Write-Host "Download content/data folder"
+            Start-ZipDownload $resourceGroup $webApp $slotName "content/data" "data.zip"
+            
+            Write-Host "Download content/images folder"
+            Start-ZipDownload $resourceGroup $webApp $slotName "content/images" "images.zip"
+            
+            Write-Host "Download content/themes/casperforyr folder"
+            Start-ZipDownload $resourceGroup $webApp $slotName "content/themes/casperforyr" "casperforyr.zip"
+          azurePowerShellVersion: 'LatestVersion'
+
+      - task: ExtractFiles@1
+        displayName: 'Extract data.zip'
+        inputs:
+          archiveFilePatterns: 'data.zip'
+          destinationFolder: 'content/data'
+          cleanDestinationFolder: true
+
+      - task: ExtractFiles@1
+        displayName: 'Extract images.zip'
+        inputs:
+          archiveFilePatterns: 'images.zip'
+          destinationFolder: 'content/images'
+          cleanDestinationFolder: true
+
+      - task: ExtractFiles@1
+        displayName: 'Extract casperforyr.zip'
+        inputs:
+          archiveFilePatterns: 'casperforyr.zip'
+          destinationFolder: 'content/themes/casperforyr'
+          cleanDestinationFolder: true
+
+      - powershell: 'Rename-Item "$(Build.Repository.LocalPath)/content/data/backup.db" "ghost.db"'
+        displayName: 'Rename database file'
+
+      - script: 'node db.js'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+        displayName: 'Upgrade database'
+
+      - task: DeleteFiles@1
+        displayName: 'Delete files from '
+        inputs:
+          SourceFolder: 
+          Contents: |
+            .git
+            .deployment
+            deploy.cmd
+            .gitignore
+            azuredeploy.json
+            config.development.json
+            data.zip
+            images.zip
+            casperforyr.zip
+            openssl
+
+      - task: ArchiveFiles@2
+        displayName: 'Archive files '
+        inputs:
+          rootFolderOrFile: '$(Build.Repository.LocalPath)'
+          includeRootFolder: false
+          archiveType: 'zip'
+          archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+          replaceExistingArchive: true
+
+      - task: CopyFiles@2
+        displayName: 'Copy File to: $(TargetFolder)'
+        inputs:
+          SourceFolder: '$(Build.ArtifactStagingDirectory)'
+          Contents: '$(Build.BuildId).zip'
+          TargetFolder: '$(Build.ArtifactStagingDirectory)\ArtifactsToBePublished'
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifact: drop'
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)\ArtifactsToBePublished'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
+- stage: DeployStaging
+  displayName: Deploy Staging
+  dependsOn: BuildGhost
+  condition: succeeded('BuildGhost')
+  pool:
+    vmImage: 'vs2017-win2016'
+  jobs:
+  - deployment: DeployStaging
+    displayName: Deploy Staging
+    environment: '$(EnvironmentStaging)'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureAppServiceManage@0
+            displayName: 'Stop Azure App Service'
+            inputs:
+              azureSubscription: '$(AzureSubscription)'
+              Action: 'Stop Azure App Service'
+              WebAppName: '$(WebApp)'
+              SpecifySlotOrASE: true
+              ResourceGroupName: '$(ResourceGroup)'
+              Slot: '$(SlotNameStaging)'
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Deploy Azure App Service to Slot'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: '$(AzureSubscription)'
+              appType: 'webApp'
+              WebAppName: '$(WebApp)'
+              deployToSlotOrASE: true
+              ResourceGroupName: '$(ResourceGroup)'
+              SlotName: '$(SlotNameStaging)'
+              packageForLinux: '$(Pipeline.Workspace)\**\*.zip'
+              WebConfigParameters: '-Handler iisnode -NodeStartFile server.js -appType node'
+              enableCustomDeployment: true
+              DeploymentType: 'webDeploy'
+              ExcludeFilesFromAppDataFlag: false
+          - task: AzureAppServiceManage@0
+            displayName: 'Start Azure App Service'
+            inputs:
+              azureSubscription: '$(AzureSubscription)'
+              Action: 'Start Azure App Service'
+              WebAppName: '$(WebApp)'
+              SpecifySlotOrASE: true
+              ResourceGroupName: '$(ResourceGroup)'
+              Slot: '$(SlotNameStaging)'
+          - task: Webapp Warmup@1
+            inputs:
+              Url: '$(UrlStaging)'
+              SleepPeriod: '10'
+- stage: DeployProduction
+  displayName: Deploy Production
+  dependsOn: DeployStaging
+  condition: succeeded('DeployStaging')
+  pool:
+    vmImage: 'vs2017-win2016'
+  jobs:
+  - deployment: DeployProduction
+    displayName: Deploy Production
+    environment: $(EnvironmentProduction)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureAppServiceManage@0
+            displayName: 'Swap Slots'
+            inputs:
+              azureSubscription: '$(AzureSubscription)'
+              Action: 'Swap Slots'
+              WebAppName: '$(WebApp)'
+              ResourceGroupName: '$(ResourceGroup)'
+              SourceSlot: '$(SlotNameStaging)'
+
+          - task: Webapp Warmup@1
+            inputs:
+              Url: '$(UrlProduction)'
+              SleepPeriod: '10'
+- stage: UpdateStaging
+  displayName: Update Staging
+  dependsOn: DeployProduction
+  condition: succeeded('DeployProduction')
+  jobs:
+  - job: DelayUpdateStaging
+    displayName: Delay Update Staging
+    pool: server
+    steps:
+      - task: Delay@1
+        inputs:
+          delayForMinutes: '15'
+  - deployment: UpdateStaging
+    displayName: Update Staging
+    dependsOn: DelayUpdateStaging
+    condition: succeeded('DelayUpdateStaging')
+    environment: $(EnvironmentStaging)
+    pool:
+      vmImage: 'vs2017-win2016'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureAppServiceManage@0
+            displayName: 'Stop Azure App Service'
+            inputs:
+              azureSubscription: '$(AzureSubscription)'
+              Action: 'Stop Azure App Service'
+              WebAppName: '$(WebApp)'
+              SpecifySlotOrASE: true
+              ResourceGroupName: '$(ResourceGroup)'
+              Slot: '$(SlotNameStaging)'
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Deploy Azure App Service to Slot'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: '$(AzureSubscription)'
+              appType: 'webApp'
+              WebAppName: '$(WebApp)'
+              deployToSlotOrASE: true
+              ResourceGroupName: '$(ResourceGroup)'
+              SlotName: '$(SlotNameStaging)'
+              packageForLinux: '$(Pipeline.Workspace)\**\*.zip'
+              WebConfigParameters: '-Handler iisnode -NodeStartFile server.js -appType node'
+              enableCustomDeployment: true
+              DeploymentType: 'webDeploy'
+              ExcludeFilesFromAppDataFlag: false
+          - task: AzureAppServiceManage@0
+            displayName: 'Start Azure App Service'
+            inputs:
+              azureSubscription: '$(AzureSubscription)'
+              Action: 'Start Azure App Service'
+              WebAppName: '$(WebApp)'
+              SpecifySlotOrASE: true
+              ResourceGroupName: '$(ResourceGroup)'
+              Slot: '$(SlotNameStaging)'
+          - task: Webapp Warmup@1
+            inputs:
+              Url: '$(UrlStaging)'
+              SleepPeriod: '10'

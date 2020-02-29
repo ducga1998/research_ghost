@@ -1,0 +1,38 @@
+{
+    "database": {
+        "client": "mysql",
+        "connection": {
+          "host": "ghostmysqlforduc.mysql.database.azure.com",
+          "port": 3306,
+          "user": "duc2820@ghostmysqlforduc",
+          "password": "chunga2820@",
+          "database": "ghost"
+        }
+      },
+    "storage": {
+        "active": "ghost-azure-storage",
+        "ghost-azure-storage": {
+            "connectionString": "DefaultEndpointsProtocol=https;AccountName=storageaccountducb6b8;AccountKey=h7MwQunkN/aZAC9LABcnxH4kYqXYnlCskcitD8np0alj6irKwB9wTPM9LSxqwCeoQID11XqIcn8aOjuat5Usqg==;EndpointSuffix=core.windows.net",
+            "container": "ghostblog",
+            "cdnUrl": "storageaccountducb6b8.blob.core.windows.net",
+            "useHttps": "true"
+        }
+    },
+    "paths": {
+        "contentPath": "content/"
+    },
+    "privacy": {
+        "useRpcPing": false,
+        "useUpdateCheck": true
+    },
+    "useMinFiles": false,
+    "caching": {
+        "theme": {
+            "maxAge": 0
+        },
+        "admin": {
+            "maxAge": 0
+        }
+    },
+    "forceAdminSSL": false
+}

@@ -1,0 +1,22 @@
+{
+    "database": {
+        "client": "mysql",
+        "connection": {
+          "host": "ghostmysqlforduc.mysql.database.azure.com",
+          "port": 3306,
+          "user": "duc2820@ghostmysqlforduc",
+          "password": "chunga2820@",
+          "database": "ghost"
+        }
+      },
+    "paths": {
+        "contentPath": "content/"
+    },
+    "logging": {
+        "level": "info",
+        "rotation": {
+            "enabled": true
+        },
+        "transports": ["file", "stdout"]
+    }
+}
